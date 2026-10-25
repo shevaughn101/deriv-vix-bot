@@ -11,8 +11,16 @@ logger = logging.getLogger("DerivClient")
 
 class DerivClient:
     def __init__(self, token: str = Config.DERIV_API_TOKEN, app_id: str = Config.DERIV_APP_ID):
-        self.token = token.strip() if token else ""
-        self.app_id = str(app_id).strip()
+        app_id_str = str(app_id).strip()
+        token_str = str(token).strip() if token else ""
+
+        # If user passed token as app_id
+        if not token_str and not app_id_str.isdigit() and len(app_id_str) > 10:
+            token_str = app_id_str
+            app_id_str = "1089"
+
+        self.token = token_str
+        self.app_id = app_id_str if app_id_str.isdigit() else "1089"
         self.endpoints = [
             f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
             f"wss://ws.binaryws.com/websockets/v3?app_id={self.app_id}"

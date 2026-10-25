@@ -5,9 +5,17 @@ load_dotenv()
 
 class Config:
     # Deriv API Settings
-    # Supports both numeric (e.g. 1089) and string App IDs
-    DERIV_APP_ID = str(os.getenv("DERIV_APP_ID", "1089")).strip()
-    DERIV_API_TOKEN = str(os.getenv("DERIV_API_TOKEN", "")).strip()
+    raw_token = str(os.getenv("DERIV_API_TOKEN", "")).strip()
+    raw_app_id = str(os.getenv("DERIV_APP_ID", "1089")).strip()
+
+    # Self-healing: If user pasted their alphanumeric token into DERIV_APP_ID
+    if not raw_app_id.isdigit() and len(raw_app_id) > 10:
+        if not raw_token:
+            raw_token = raw_app_id
+        raw_app_id = "1089"
+
+    DERIV_API_TOKEN = raw_token
+    DERIV_APP_ID = raw_app_id if raw_app_id.isdigit() else "1089"
     DERIV_WS_URL = os.getenv("DERIV_WS_URL", f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}")
 
     # Watchlist of Volatility Indices
