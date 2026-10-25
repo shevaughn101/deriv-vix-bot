@@ -10,9 +10,9 @@ from config import Config
 logger = logging.getLogger("DerivClient")
 
 class DerivClient:
-    def __init__(self, token: str = Config.DERIV_API_TOKEN, app_id: int = Config.DERIV_APP_ID):
-        self.token = token
-        self.app_id = app_id
+    def __init__(self, token: str = Config.DERIV_API_TOKEN, app_id: str = Config.DERIV_APP_ID):
+        self.token = token.strip() if token else ""
+        self.app_id = str(app_id).strip()
         self.endpoints = [
             f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
             f"wss://ws.binaryws.com/websockets/v3?app_id={self.app_id}"

@@ -5,9 +5,9 @@ load_dotenv()
 
 class Config:
     # Deriv API Settings
-    # App ID 1089 is Deriv's official generic public App ID for testing/third-party apps
-    DERIV_APP_ID = int(os.getenv("DERIV_APP_ID", "1089"))
-    DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "")
+    # Supports both numeric (e.g. 1089) and string App IDs
+    DERIV_APP_ID = str(os.getenv("DERIV_APP_ID", "1089")).strip()
+    DERIV_API_TOKEN = str(os.getenv("DERIV_API_TOKEN", "")).strip()
     DERIV_WS_URL = os.getenv("DERIV_WS_URL", f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}")
 
     # Watchlist of Volatility Indices
