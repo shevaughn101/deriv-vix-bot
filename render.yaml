@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: deriv-vix-sci-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn web_app:app --host 0.0.0.0 --port $PORT
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.8
+      - key: DERIV_API_TOKEN
+        sync: false
+      - key: DERIV_APP_ID
+        value: 1089
+      - key: WATCHLIST
+        value: R_100,R_75,R_50,R_25,R_10,1HZ100V,1HZ75V,1HZ50V
+      - key: STAKE_AMOUNT
+        value: 10.0
+      - key: RR_RATIO
+        value: 3.0
+      - key: BREAKEVEN_R
+        value: 1.5
