@@ -93,16 +93,37 @@ class DerivClient:
                 return False
 
             auth_data = res.get("authorize", {})
+            account_list = auth_data.get("account_list", [])
+            
+            # Check if current authorized account is Demo (Virtual)
+            is_virtual = bool(auth_data.get("is_virtual", 0))
+            
+            # If authorized on a Real account, look for the Demo account in account_list
+            if not is_virtual and account_list:
+                for acc in account_list:
+                    if acc.get("is_virtual") == 1:
+                        demo_token = acc.get("token")
+                        if demo_token and demo_token != self.token:
+                            logger.info(f"Switching from Real to Demo account ({acc.get('loginid')})...")
+                            switch_res = await self.send_request({"authorize": demo_token})
+                            if "authorize" in switch_res:
+                                auth_data = switch_res["authorize"]
+                                is_virtual = True
+                                break
+
             self.account_info = {
                 "loginid": auth_data.get("loginid"),
                 "balance": float(auth_data.get("balance", 0.0)),
                 "currency": auth_data.get("currency", "USD"),
-                "is_virtual": bool(auth_data.get("is_virtual", 1)),
+                "is_virtual": is_virtual,
                 "email": auth_data.get("email")
             }
             self.is_authorized = True
-            account_type = "DEMO (Virtual)" if self.account_info["is_virtual"] else "REAL"
-            logger.info(f"Authorized successfully on {account_type} Account: {self.account_info['loginid']} | Balance: ${self.account_info['balance']} {self.account_info['currency']}")
+            
+            if self.account_info["is_virtual"]:
+                logger.info(f"🔒 SAFETY ACTIVE: Connected to DEMO (Virtual) Account: {self.account_info['loginid']} | Balance: ${self.account_info['balance']} {self.account_info['currency']}")
+            else:
+                logger.warning(f"Connected to REAL Account: {self.account_info['loginid']}. If you want Demo, make sure your token is from your virtual account.")
             return True
         except Exception as e:
             logger.error(f"Authorization error: {e}")
