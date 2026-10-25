@@ -1,19 +1,23 @@
 import json
 import asyncio
 import logging
-from typing import Dict, Any, Optional, List
+import ssl
+from typing import Dict, Any, Optional
 import pandas as pd
 import websockets
 from config import Config
 
 logger = logging.getLogger("DerivClient")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 class DerivClient:
     def __init__(self, token: str = Config.DERIV_API_TOKEN, app_id: int = Config.DERIV_APP_ID):
         self.token = token
         self.app_id = app_id
-        self.ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+        self.endpoints = [
+            f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
+            f"wss://ws.binaryws.com/websockets/v3?app_id={self.app_id}"
+        ]
+        self.current_endpoint_idx = 0
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.account_info: Dict[str, Any] = {}
         self.is_authorized = False
@@ -22,24 +26,65 @@ class DerivClient:
         self._listen_task: Optional[asyncio.Task] = None
         self._ping_task: Optional[asyncio.Task] = None
         self.is_running = True
+        self._connecting = False
+
+    @property
+    def ws_url(self) -> str:
+        return self.endpoints[self.current_endpoint_idx]
 
     async def connect(self) -> bool:
-        """Establishes WebSocket connection and starts listener."""
-        try:
-            logger.info(f"Connecting to Deriv WebSocket: {self.ws_url}")
-            self.ws = await websockets.connect(self.ws_url, ping_interval=None)
-            self._listen_task = asyncio.create_task(self._listener())
-            self._ping_task = asyncio.create_task(self._ping_loop())
-            
-            if self.token:
-                auth_success = await self.authorize()
-                return auth_success
-            else:
-                logger.warning("No DERIV_API_TOKEN provided. Running in view-only / unauthenticated mode.")
-                return True
-        except Exception as e:
-            logger.error(f"Failed to connect to Deriv WebSocket: {e}")
+        """Establishes resilient WebSocket connection and starts background workers."""
+        if self._connecting:
             return False
+        self._connecting = True
+        
+        # Clean up any dead connection
+        if self.ws and not self.ws.closed:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+
+        ssl_ctx = ssl.create_default_context()
+        
+        for attempt in range(len(self.endpoints)):
+            endpoint = self.endpoints[self.current_endpoint_idx]
+            try:
+                logger.info(f"Connecting to Deriv Gateway: {endpoint}")
+                self.ws = await websockets.connect(
+                    endpoint, 
+                    ssl=ssl_ctx,
+                    ping_interval=None,
+                    open_timeout=15,
+                    close_timeout=10
+                )
+                
+                # Start background message listener and ping loop
+                if self._listen_task and not self._listen_task.done():
+                    self._listen_task.cancel()
+                if self._ping_task and not self._ping_task.done():
+                    self._ping_task.cancel()
+
+                self._listen_task = asyncio.create_task(self._listener())
+                self._ping_task = asyncio.create_task(self._ping_loop())
+                
+                logger.info("Connected to Deriv WebSocket successfully.")
+                self._connecting = False
+
+                if self.token:
+                    return await self.authorize()
+                else:
+                    logger.warning("No DERIV_API_TOKEN set in environment. Running in view-only mode.")
+                    return True
+
+            except Exception as e:
+                logger.warning(f"Connection attempt to {endpoint} failed: {e}. Trying alternate endpoint...")
+                self.current_endpoint_idx = (self.current_endpoint_idx + 1) % len(self.endpoints)
+                await asyncio.sleep(2)
+
+        self._connecting = False
+        logger.error("All Deriv endpoints failed to connect. Will retry on next cycle.")
+        return False
 
     async def _listener(self):
         """Continuously reads incoming messages from WebSocket."""
@@ -56,24 +101,23 @@ class DerivClient:
         except Exception as e:
             logger.error(f"Listener error: {e}")
         finally:
-            if self.is_running:
-                logger.info("Attempting automatic reconnection in 5 seconds...")
-                await asyncio.sleep(5)
-                await self.connect()
+            self.is_authorized = False
 
     async def _ping_loop(self):
-        """Keeps connection alive by pinging every 30 seconds."""
+        """Keeps connection alive by pinging every 25 seconds."""
         while self.is_running and self.ws and not self.ws.closed:
             try:
-                await asyncio.sleep(30)
-                await self.send_request({"ping": 1})
+                await asyncio.sleep(25)
+                await self.send_request({"ping": 1}, timeout=5.0)
             except Exception:
                 break
 
-    async def send_request(self, payload: Dict[str, Any], timeout: float = 15.0) -> Dict[str, Any]:
+    async def send_request(self, payload: Dict[str, Any], timeout: float = 12.0) -> Dict[str, Any]:
         """Sends a JSON request with a unique req_id and awaits the response."""
         if not self.ws or self.ws.closed:
-            raise ConnectionError("Deriv WebSocket is not connected.")
+            connected = await self.connect()
+            if not connected or not self.ws or self.ws.closed:
+                raise ConnectionError("Deriv WebSocket is not connected.")
 
         self.req_id += 1
         payload["req_id"] = self.req_id
@@ -84,7 +128,10 @@ class DerivClient:
         return await asyncio.wait_for(future, timeout=timeout)
 
     async def authorize(self) -> bool:
-        """Authorizes user using the Deriv Demo API token."""
+        """Authorizes user using the Deriv API token and forces Demo mode."""
+        if not self.token:
+            return False
+
         try:
             res = await self.send_request({"authorize": self.token})
             if "error" in res:
@@ -94,11 +141,9 @@ class DerivClient:
 
             auth_data = res.get("authorize", {})
             account_list = auth_data.get("account_list", [])
-            
-            # Check if current authorized account is Demo (Virtual)
             is_virtual = bool(auth_data.get("is_virtual", 0))
-            
-            # If authorized on a Real account, look for the Demo account in account_list
+
+            # Automatically switch to Demo account if authorized on Real
             if not is_virtual and account_list:
                 for acc in account_list:
                     if acc.get("is_virtual") == 1:
@@ -119,18 +164,19 @@ class DerivClient:
                 "email": auth_data.get("email")
             }
             self.is_authorized = True
-            
+
             if self.account_info["is_virtual"]:
-                logger.info(f"🔒 SAFETY ACTIVE: Connected to DEMO (Virtual) Account: {self.account_info['loginid']} | Balance: ${self.account_info['balance']} {self.account_info['currency']}")
+                logger.info(f"🔒 SAFETY ACTIVE: Connected to DEMO Account: {self.account_info['loginid']} | Balance: ${self.account_info['balance']} {self.account_info['currency']}")
             else:
-                logger.warning(f"Connected to REAL Account: {self.account_info['loginid']}. If you want Demo, make sure your token is from your virtual account.")
+                logger.warning(f"Connected to REAL Account: {self.account_info['loginid']}.")
             return True
+
         except Exception as e:
             logger.error(f"Authorization error: {e}")
             self.is_authorized = False
             return False
 
-    async def get_candles(self, symbol: str, granularity: int = 3600, count: int = 100) -> pd.DataFrame:
+    async def get_candles(self, symbol: str, granularity: int = 3600, count: int = 80) -> pd.DataFrame:
         """Fetches historical OHLC candle data for any Deriv Volatility index."""
         try:
             req = {
@@ -144,7 +190,7 @@ class DerivClient:
             }
             res = await self.send_request(req)
             if "error" in res:
-                logger.error(f"Error fetching candles for {symbol}: {res['error']['message']}")
+                logger.warning(f"Could not fetch candles for {symbol}: {res['error']['message']}")
                 return pd.DataFrame()
 
             candles = res.get("candles", [])
@@ -161,7 +207,7 @@ class DerivClient:
             })
             return df
         except Exception as e:
-            logger.error(f"Failed to fetch candles for {symbol}: {e}")
+            logger.warning(f"Failed to fetch candles for {symbol}: {e}")
             return pd.DataFrame()
 
     async def buy_contract(
@@ -173,16 +219,12 @@ class DerivClient:
         stop_loss_usd: Optional[float] = None, 
         take_profit_usd: Optional[float] = None
     ) -> Dict[str, Any]:
-        """
-        Executes a Multiplier trade (CFD-like with SL/TP) on Deriv.
-        Falls back to High/Low contract if Multiplier proposal is rejected.
-        """
+        """Executes a Multiplier trade (CFD-like with SL/TP) or Fallback High/Low on Deriv."""
         if not self.is_authorized:
             return {"success": False, "error": "Not authorized with Deriv API"}
 
         contract_type = "MULTUP" if direction.upper() == "BUY" else "MULTDOWN"
         try:
-            # 1. Multiplier Proposal
             proposal_req = {
                 "proposal": 1,
                 "amount": stake,
@@ -192,8 +234,6 @@ class DerivClient:
                 "symbol": symbol,
                 "multiplier": multiplier
             }
-            
-            # Attach SL and TP if provided
             limit_orders = {}
             if stop_loss_usd and stop_loss_usd > 0:
                 limit_orders["stop_loss"] = round(stop_loss_usd, 2)
@@ -203,7 +243,6 @@ class DerivClient:
                 proposal_req["limit_order"] = limit_orders
 
             prop_res = await self.send_request(proposal_req)
-            
             if "error" not in prop_res and "proposal" in prop_res:
                 proposal_id = prop_res["proposal"]["id"]
                 buy_res = await self.send_request({"buy": proposal_id, "price": stake})
@@ -218,8 +257,7 @@ class DerivClient:
                         "details": buy_res["buy"]
                     }
 
-            # 2. Fallback to Rise/Fall contract if Multiplier not accepted
-            logger.info(f"Multiplier proposal unaccepted. Executing Rise/Fall Contract for {symbol}...")
+            # Fallback to Rise/Fall
             fall_type = "CALL" if direction.upper() == "BUY" else "PUT"
             fallback_req = {
                 "buy": 1,
@@ -253,7 +291,7 @@ class DerivClient:
             return {"success": False, "error": str(e)}
 
     async def get_contract_status(self, contract_id: int) -> Dict[str, Any]:
-        """Checks the real-time profit and status of an open contract."""
+        """Checks real-time profit and status of open contract."""
         try:
             res = await self.send_request({"proposal_open_contract": 1, "contract_id": contract_id})
             poc = res.get("proposal_open_contract", {})
@@ -265,7 +303,7 @@ class DerivClient:
                 "entry_spot": poc.get("entry_spot")
             }
         except Exception as e:
-            logger.error(f"Failed to check contract status: {e}")
+            logger.warning(f"Failed to check contract status: {e}")
             return {"is_sold": False, "profit": 0.0, "status": "unknown"}
 
     async def close(self):
