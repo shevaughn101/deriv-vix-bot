@@ -173,10 +173,16 @@ class DerivClient:
         await self.ws.send(json.dumps(payload))
         return await asyncio.wait_for(future, timeout=timeout)
 
-    async def authorize(self) -> bool:
+    async def authorize(self, new_token: Optional[str] = None) -> bool:
         """Authorizes user using the Deriv API token and forces Demo mode."""
+        if new_token:
+            self.token = str(new_token).strip()
         if not self.token:
             return False
+        if is_ws_closed(self.ws):
+            connected = await self.connect()
+            if not connected:
+                return False
 
         try:
             res = await self.send_request({"authorize": self.token})

@@ -70,6 +70,10 @@ class BotManager:
                 logger.warning("Waiting for connection to Deriv...")
                 return
 
+        # If connected but not yet authorized, attempt authorization
+        if self.client.is_connected and not self.client.is_authorized and self.client.token:
+            await self.client.authorize()
+
         for symbol in Config.WATCHLIST:
             symbol = symbol.strip()
             try:
@@ -181,6 +185,46 @@ class BotManager:
             self.trade_history.insert(0, closed_record)
             logger.info(f"🏁 Contract Closed: {self.active_trade['symbol']} | Result: {outcome} (${final_profit})")
             self.active_trade = None
+
+    async def execute_test_trade(self, symbol: str = "R_100", direction: str = "BUY") -> Dict[str, Any]:
+        """Manually fires off a test trade on Demo account to verify order execution."""
+        if not self.client.is_connected:
+            await self.client.connect()
+        if not self.client.is_authorized:
+            auth_ok = await self.client.authorize()
+            if not auth_ok:
+                return {
+                    "success": False,
+                    "error": "Deriv client is not authorized. Please check your API token."
+                }
+
+        # Fetch latest price for SL/TP calculation
+        df = await self.client.get_candles(symbol, granularity=Config.DETAIL_TIMEFRAME, count=5)
+        latest_price = float(df["close"].iloc[-1]) if not df.empty else 1000.0
+        risk_dist = max(latest_price * 0.005, 1.0)
+        
+        setup = {
+            "signal": direction.upper(),
+            "entry_price": latest_price,
+            "sl_price": round(latest_price - risk_dist if direction.upper() == "BUY" else latest_price + risk_dist, 2),
+            "tp_price": round(latest_price + (risk_dist * Config.RR_RATIO) if direction.upper() == "BUY" else latest_price - (risk_dist * Config.RR_RATIO), 2),
+            "risk_dist": risk_dist
+        }
+        
+        logger.info(f"Manual test trade requested: {symbol} {direction}")
+        await self._execute_trade(symbol, setup)
+        
+        if self.active_trade:
+            return {
+                "success": True,
+                "message": f"Test Demo trade opened on {symbol} ({direction})",
+                "trade": self.active_trade
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Trade submission rejected by Deriv. Check logs."
+            }
 
     async def stop(self):
         """Shuts down bot manager."""

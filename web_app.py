@@ -48,6 +48,37 @@ async def get_status():
         "history": bot.trade_history[:15]
     }
 
+@app.post("/api/test-trade")
+async def trigger_test_trade(request: Request):
+    """Manually fires off a test demo trade on R_100."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    symbol = data.get("symbol", "R_100")
+    direction = data.get("direction", "BUY")
+    result = await bot.execute_test_trade(symbol, direction)
+    return result
+
+@app.post("/api/set-token")
+async def set_token(request: Request):
+    """Sets or updates the Deriv API token dynamically."""
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"success": False, "error": "Invalid JSON"})
+    token = data.get("token", "").strip()
+    if not token:
+        return {"success": False, "error": "Token cannot be empty"}
+    bot.client.token = token
+    auth_ok = await bot.client.authorize()
+    return {
+        "success": auth_ok,
+        "authorized": bot.client.is_authorized,
+        "account": bot.client.account_info,
+        "error": "Deriv authorization failed. Please check the token." if not auth_ok else None
+    }
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     """Renders sleek dark-mode trading dashboard matching our Pine Script HUD."""
@@ -197,6 +228,34 @@ async def dashboard():
                     <span class="badge badge-disconnected">Connecting...</span>
                 </div>
             </header>
+ 
+            <!-- Action / Test Trade / Token Panel -->
+            <div class="card" style="margin-bottom: 20px; background: #162038; border: 1px solid #3a506b;">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                    <div>
+                        <strong style="font-size: 16px; color: var(--text);">🕹️ Bot Controls</strong>
+                        <div style="font-size: 13px; color: var(--text-muted); margin-top: 2px;">
+                            Trigger an instant test trade on your Deriv Demo account.
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <button id="btn-test-trade" onclick="triggerTestTrade('R_100', 'BUY')" style="background: var(--green); color: #000; border: none; padding: 10px 18px; border-radius: 6px; font-weight: 700; cursor: pointer; font-size: 14px; transition: 0.2s;">
+                            ⚡ Fire Test Demo Trade ($10 BUY on R_100)
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Token input box shown if not authorized -->
+                <div id="token-box" style="margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border); display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                    <span style="font-size: 13px; color: var(--accent);">🔑 Deriv API Token:</span>
+                    <input id="token-input" type="password" placeholder="Paste your Deriv API token here..." style="flex: 1; min-width: 260px; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px;" />
+                    <button onclick="saveToken()" style="background: var(--accent); color: #000; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13px;">
+                        Connect Token
+                    </button>
+                </div>
+
+                <div id="action-msg" style="display: none; margin-top: 12px; padding: 12px; border-radius: 6px; font-size: 13px; font-weight: 600;"></div>
+            </div>
 
             <div class="grid">
                 <div class="card">
@@ -271,16 +330,19 @@ async def dashboard():
                     const res = await fetch('/api/status');
                     const data = await res.json();
 
-                    // 1. Account Badge & Balance
+                    // 1. Account Badge & Balance & Token Box
                     const badgeContainer = document.getElementById('account-badge');
+                    const tokenBox = document.getElementById('token-box');
                     if (data.is_authorized && data.account) {
                         const isVirtual = data.account.is_virtual;
                         badgeContainer.innerHTML = `<span class="badge ${isVirtual ? 'badge-demo' : 'badge-live'}">
                             ${isVirtual ? '🟢 DEMO ACCOUNT' : '🔴 REAL ACCOUNT'}: ${data.account.loginid}
                         </span>`;
                         document.getElementById('acc-balance').innerText = `$${data.account.balance.toFixed(2)}`;
+                        if (tokenBox) tokenBox.style.display = 'none';
                     } else {
-                        badgeContainer.innerHTML = `<span class="badge badge-disconnected">⚠️ Unauthenticated (Check Token)</span>`;
+                        badgeContainer.innerHTML = `<span class="badge badge-disconnected">⚠️ Unauthenticated (Connect Token Below)</span>`;
+                        if (tokenBox) tokenBox.style.display = 'flex';
                     }
 
                     // 2. Performance Stats
@@ -352,6 +414,80 @@ async def dashboard():
 
                 } catch (err) {
                     console.error("Dashboard update error:", err);
+                }
+            }
+
+            async function triggerTestTrade(symbol, direction) {
+                const btn = document.getElementById('btn-test-trade');
+                const msgBox = document.getElementById('action-msg');
+                btn.disabled = true;
+                btn.innerText = "⏳ Submitting Order to Deriv...";
+                msgBox.style.display = 'none';
+
+                try {
+                    const res = await fetch('/api/test-trade', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ symbol: symbol, direction: direction })
+                    });
+                    const result = await res.json();
+                    msgBox.style.display = 'block';
+                    if (result.success) {
+                        msgBox.style.background = 'rgba(6, 214, 160, 0.2)';
+                        msgBox.style.color = 'var(--green)';
+                        msgBox.style.border = '1px solid var(--green)';
+                        msgBox.innerHTML = `✅ <strong>Demo Order Placed!</strong> Contract ID: ${result.trade.contract_id} | ${result.trade.symbol} ${result.trade.direction} @ ${result.trade.entry_price}`;
+                        updateDashboard();
+                    } else {
+                        msgBox.style.background = 'rgba(231, 29, 54, 0.2)';
+                        msgBox.style.color = 'var(--red)';
+                        msgBox.style.border = '1px solid var(--red)';
+                        msgBox.innerHTML = `❌ <strong>Order Failed:</strong> ${result.error || 'Check server logs'}`;
+                    }
+                } catch (e) {
+                    msgBox.style.display = 'block';
+                    msgBox.style.background = 'rgba(231, 29, 54, 0.2)';
+                    msgBox.style.color = 'var(--red)';
+                    msgBox.innerHTML = `❌ Error: ${e.message}`;
+                } finally {
+                    btn.disabled = false;
+                    btn.innerText = "⚡ Fire Test Demo Trade ($10 BUY on R_100)";
+                }
+            }
+
+            async function saveToken() {
+                const inp = document.getElementById('token-input');
+                const token = inp.value.trim();
+                const msgBox = document.getElementById('action-msg');
+                if (!token) return;
+
+                msgBox.style.display = 'block';
+                msgBox.style.background = 'rgba(72, 202, 228, 0.2)';
+                msgBox.style.color = 'var(--accent)';
+                msgBox.innerText = "Authorizing with Deriv...";
+
+                try {
+                    const res = await fetch('/api/set-token', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ token: token })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        msgBox.style.background = 'rgba(6, 214, 160, 0.2)';
+                        msgBox.style.color = 'var(--green)';
+                        msgBox.style.border = '1px solid var(--green)';
+                        msgBox.innerHTML = `✅ Authorized! Connected to DEMO Account: ${data.account.loginid} ($${data.account.balance})`;
+                        inp.value = '';
+                        updateDashboard();
+                    } else {
+                        msgBox.style.background = 'rgba(231, 29, 54, 0.2)';
+                        msgBox.style.color = 'var(--red)';
+                        msgBox.style.border = '1px solid var(--red)';
+                        msgBox.innerHTML = `❌ Failed to authorize: ${data.error || 'Invalid token'}`;
+                    }
+                } catch (e) {
+                    msgBox.innerHTML = `❌ Error: ${e.message}`;
                 }
             }
 
