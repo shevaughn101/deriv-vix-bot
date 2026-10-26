@@ -27,6 +27,8 @@ class DerivClient:
     def __init__(self, token: str = Config.DERIV_API_TOKEN, app_id: str = Config.DERIV_APP_ID):
         self.token = str(token).strip() if token else ""
         self.app_id = str(app_id).strip() if app_id else "34MjkAbFq1p73SzDZDHQg"
+        if self.token.startswith("pat_") and (not self.app_id or self.app_id == "1089"):
+            self.app_id = "34MjkAbFq1p73SzDZDHQg"
         self.endpoints = [
             f"wss://red.derivws.com/websockets/v3?app_id={self.app_id}",
             f"wss://blue.derivws.com/websockets/v3?app_id={self.app_id}",

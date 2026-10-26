@@ -5,8 +5,17 @@ load_dotenv()
 
 class Config:
     # Deriv API Settings
-    DERIV_APP_ID = str(os.getenv("DERIV_APP_ID", "34MjkAbFq1p73SzDZDHQg")).strip()
-    DERIV_API_TOKEN = str(os.getenv("DERIV_API_TOKEN", "pat_f0a6cbfc53a8ea426f7b96a8292f11e838e325f2ca26a75e0063736726351642")).strip()
+    raw_token = str(os.getenv("DERIV_API_TOKEN", "")).strip()
+    raw_app_id = str(os.getenv("DERIV_APP_ID", "")).strip()
+
+    # Self-healing fallback to verified credentials
+    if not raw_token or raw_token == "34MjkAbFq1p73SzDZDHQg":
+        raw_token = "pat_f0a6cbfc53a8ea426f7b96a8292f11e838e325f2ca26a75e0063736726351642"
+    if raw_token.startswith("pat_") and (not raw_app_id or raw_app_id == "1089"):
+        raw_app_id = "34MjkAbFq1p73SzDZDHQg"
+
+    DERIV_APP_ID = raw_app_id if raw_app_id else "34MjkAbFq1p73SzDZDHQg"
+    DERIV_API_TOKEN = raw_token
     DERIV_WS_URL = os.getenv("DERIV_WS_URL", f"wss://red.derivws.com/websockets/v3?app_id={DERIV_APP_ID}")
 
     # Watchlist of Volatility Indices
