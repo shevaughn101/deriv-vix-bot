@@ -63,7 +63,7 @@ class BotManager:
     async def _scan_market(self):
         """Fetches candles and evaluates each VIX symbol in the watchlist."""
         # Ensure WebSocket is connected before scanning
-        if not self.client.ws or self.client.ws.closed:
+        if not self.client.is_connected:
             logger.info("Connecting to Deriv WebSocket before scan...")
             connected = await self.client.connect()
             if not connected:

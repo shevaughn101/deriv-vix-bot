@@ -9,6 +9,20 @@ from config import Config
 
 logger = logging.getLogger("DerivClient")
 
+def is_ws_closed(ws) -> bool:
+    """Robust check for closed state across websockets <14 and >=14."""
+    if ws is None:
+        return True
+    if hasattr(ws, "closed"):
+        return bool(ws.closed)
+    if hasattr(ws, "state"):
+        try:
+            from websockets.protocol import State
+            return ws.state != State.OPEN
+        except Exception:
+            return ws.state != 1
+    return False
+
 class DerivClient:
     def __init__(self, token: str = Config.DERIV_API_TOKEN, app_id: str = Config.DERIV_APP_ID):
         app_id_str = str(app_id).strip()
@@ -22,11 +36,14 @@ class DerivClient:
         self.token = token_str
         self.app_id = app_id_str if app_id_str.isdigit() else "1089"
         self.endpoints = [
+            f"wss://red.derivws.com/websockets/v3?app_id={self.app_id}",
+            f"wss://blue.derivws.com/websockets/v3?app_id={self.app_id}",
+            f"wss://green.derivws.com/websockets/v3?app_id={self.app_id}",
             f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}",
             f"wss://ws.binaryws.com/websockets/v3?app_id={self.app_id}"
         ]
         self.current_endpoint_idx = 0
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.ws: Optional[Any] = None
         self.account_info: Dict[str, Any] = {}
         self.is_authorized = False
         self.req_id = 0
@@ -35,6 +52,11 @@ class DerivClient:
         self._ping_task: Optional[asyncio.Task] = None
         self.is_running = True
         self._connecting = False
+
+    @property
+    def is_connected(self) -> bool:
+        """Returns True if the WebSocket connection is active and open."""
+        return not is_ws_closed(self.ws)
 
     @property
     def ws_url(self) -> str:
@@ -47,25 +69,41 @@ class DerivClient:
         self._connecting = True
         
         # Clean up any dead connection
-        if self.ws and not self.ws.closed:
+        if not is_ws_closed(self.ws):
             try:
                 await self.ws.close()
             except Exception:
                 pass
 
         ssl_ctx = ssl.create_default_context()
+        headers = {"Origin": "https://app.deriv.com"}
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         
         for attempt in range(len(self.endpoints)):
             endpoint = self.endpoints[self.current_endpoint_idx]
             try:
                 logger.info(f"Connecting to Deriv Gateway: {endpoint}")
-                self.ws = await websockets.connect(
-                    endpoint, 
-                    ssl=ssl_ctx,
-                    ping_interval=None,
-                    open_timeout=15,
-                    close_timeout=10
-                )
+                try:
+                    # websockets >= 14
+                    self.ws = await websockets.connect(
+                        endpoint, 
+                        ssl=ssl_ctx,
+                        additional_headers=headers,
+                        user_agent_header=user_agent,
+                        ping_interval=None,
+                        open_timeout=15,
+                        close_timeout=10
+                    )
+                except TypeError:
+                    # websockets < 14
+                    self.ws = await websockets.connect(
+                        endpoint, 
+                        ssl=ssl_ctx,
+                        extra_headers={"User-Agent": user_agent, **headers},
+                        ping_interval=None,
+                        open_timeout=15,
+                        close_timeout=10
+                    )
                 
                 # Start background message listener and ping loop
                 if self._listen_task and not self._listen_task.done():
@@ -113,7 +151,7 @@ class DerivClient:
 
     async def _ping_loop(self):
         """Keeps connection alive by pinging every 25 seconds."""
-        while self.is_running and self.ws and not self.ws.closed:
+        while self.is_running and not is_ws_closed(self.ws):
             try:
                 await asyncio.sleep(25)
                 await self.send_request({"ping": 1}, timeout=5.0)
@@ -122,9 +160,9 @@ class DerivClient:
 
     async def send_request(self, payload: Dict[str, Any], timeout: float = 12.0) -> Dict[str, Any]:
         """Sends a JSON request with a unique req_id and awaits the response."""
-        if not self.ws or self.ws.closed:
+        if is_ws_closed(self.ws):
             connected = await self.connect()
-            if not connected or not self.ws or self.ws.closed:
+            if not connected or is_ws_closed(self.ws):
                 raise ConnectionError("Deriv WebSocket is not connected.")
 
         self.req_id += 1
@@ -321,5 +359,5 @@ class DerivClient:
             self._listen_task.cancel()
         if self._ping_task:
             self._ping_task.cancel()
-        if self.ws and not self.ws.closed:
+        if not is_ws_closed(self.ws):
             await self.ws.close()
