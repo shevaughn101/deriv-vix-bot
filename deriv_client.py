@@ -25,16 +25,8 @@ def is_ws_closed(ws) -> bool:
 
 class DerivClient:
     def __init__(self, token: str = Config.DERIV_API_TOKEN, app_id: str = Config.DERIV_APP_ID):
-        app_id_str = str(app_id).strip()
-        token_str = str(token).strip() if token else ""
-
-        # If user passed token as app_id
-        if not token_str and not app_id_str.isdigit() and len(app_id_str) > 10:
-            token_str = app_id_str
-            app_id_str = "1089"
-
-        self.token = token_str
-        self.app_id = app_id_str if app_id_str.isdigit() else "1089"
+        self.token = str(token).strip() if token else ""
+        self.app_id = str(app_id).strip() if app_id else "34MjkAbFq1p73SzDZDHQg"
         self.endpoints = [
             f"wss://red.derivws.com/websockets/v3?app_id={self.app_id}",
             f"wss://blue.derivws.com/websockets/v3?app_id={self.app_id}",
@@ -52,6 +44,50 @@ class DerivClient:
         self._ping_task: Optional[asyncio.Task] = None
         self.is_running = True
         self._connecting = False
+
+    def _fetch_pat_otp_url(self) -> Optional[str]:
+        """Fetches Demo account and WebSocket OTP URL using Deriv PAT REST API."""
+        try:
+            import urllib.request
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "Deriv-App-ID": self.app_id,
+                "Content-Type": "application/json"
+            }
+            # 1. Get Accounts
+            acc_req = urllib.request.Request("https://api.derivws.com/trading/v1/options/accounts", headers=headers)
+            with urllib.request.urlopen(acc_req, timeout=10) as res:
+                acc_data = json.loads(res.read().decode()).get("data", [])
+
+            demo_acc = None
+            for acc in acc_data:
+                if acc.get("account_type") == "demo" or acc.get("group") == "demo":
+                    demo_acc = acc
+                    break
+            if not demo_acc and acc_data:
+                demo_acc = acc_data[0]
+
+            if not demo_acc:
+                logger.error("No account found for PAT token.")
+                return None
+
+            account_id = demo_acc.get("account_id")
+            self.account_info = {
+                "loginid": account_id,
+                "balance": float(demo_acc.get("balance", 0.0)),
+                "currency": demo_acc.get("currency", "USD"),
+                "is_virtual": True
+            }
+
+            # 2. Get OTP
+            otp_url = f"https://api.derivws.com/trading/v1/options/accounts/{account_id}/otp"
+            otp_req = urllib.request.Request(otp_url, headers=headers, method="POST")
+            with urllib.request.urlopen(otp_req, timeout=10) as res:
+                otp_data = json.loads(res.read().decode())
+                return otp_data.get("data", {}).get("url")
+        except Exception as e:
+            logger.error(f"PAT OTP error: {e}")
+            return None
 
     @property
     def is_connected(self) -> bool:
@@ -78,6 +114,28 @@ class DerivClient:
         ssl_ctx = ssl.create_default_context()
         headers = {"Origin": "https://app.deriv.com"}
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+        # Special handling for Deriv PAT (Personal Access Token) via Options API
+        if self.token and self.token.startswith("pat_"):
+            ws_url = self._fetch_pat_otp_url()
+            if ws_url:
+                try:
+                    logger.info("Connecting to Deriv PAT Options Gateway...")
+                    self.ws = await websockets.connect(
+                        ws_url,
+                        ssl=ssl_ctx,
+                        ping_interval=None,
+                        open_timeout=15,
+                        close_timeout=10
+                    )
+                    self._listen_task = asyncio.create_task(self._listener())
+                    self._ping_task = asyncio.create_task(self._ping_loop())
+                    self.is_authorized = True
+                    logger.info(f"🔒 SAFETY ACTIVE: Connected to DEMO Account: {self.account_info['loginid']} | Balance: ${self.account_info['balance']} {self.account_info['currency']}")
+                    self._connecting = False
+                    return True
+                except Exception as e:
+                    logger.warning(f"PAT Gateway connection failed: {e}")
         
         for attempt in range(len(self.endpoints)):
             endpoint = self.endpoints[self.current_endpoint_idx]
@@ -179,6 +237,10 @@ class DerivClient:
             self.token = str(new_token).strip()
         if not self.token:
             return False
+
+        if self.token.startswith("pat_"):
+            return await self.connect()
+
         if is_ws_closed(self.ws):
             connected = await self.connect()
             if not connected:
@@ -284,6 +346,7 @@ class DerivClient:
                 "contract_type": contract_type,
                 "currency": self.account_info.get("currency", "USD"),
                 "symbol": symbol,
+                "underlying_symbol": symbol,
                 "multiplier": multiplier
             }
             limit_orders = {}
@@ -309,34 +372,37 @@ class DerivClient:
                         "details": buy_res["buy"]
                     }
 
-            # Fallback to Rise/Fall
+            # Fallback to Rise/Fall Options
             fall_type = "CALL" if direction.upper() == "BUY" else "PUT"
-            fallback_req = {
-                "buy": 1,
-                "price": stake,
-                "parameters": {
-                    "amount": stake,
-                    "basis": "stake",
-                    "contract_type": fall_type,
-                    "currency": self.account_info.get("currency", "USD"),
-                    "duration": 60,
-                    "duration_unit": "m",
-                    "symbol": symbol
-                }
+            fallback_prop = {
+                "proposal": 1,
+                "amount": stake,
+                "basis": "stake",
+                "contract_type": fall_type,
+                "currency": self.account_info.get("currency", "USD"),
+                "underlying_symbol": symbol,
+                "symbol": symbol,
+                "duration": 15,
+                "duration_unit": "m"
             }
-            fall_res = await self.send_request(fallback_req)
-            if "buy" in fall_res:
-                contract_id = fall_res["buy"]["contract_id"]
-                logger.info(f"✅ Rise/Fall Trade Executed: {symbol} {direction} | Contract ID: {contract_id}")
-                return {
-                    "success": True,
-                    "type": "RISE_FALL",
-                    "contract_id": contract_id,
-                    "buy_price": fall_res["buy"]["buy_price"],
-                    "details": fall_res["buy"]
-                }
+            fall_res = await self.send_request(fallback_prop)
+            if "proposal" in fall_res:
+                p_id = fall_res["proposal"]["id"]
+                buy_res = await self.send_request({"buy": p_id, "price": stake})
+                if "buy" in buy_res:
+                    contract_id = buy_res["buy"]["contract_id"]
+                    logger.info(f"✅ Rise/Fall Trade Executed: {symbol} {direction} | Contract ID: {contract_id}")
+                    return {
+                        "success": True,
+                        "type": "RISE_FALL",
+                        "contract_id": contract_id,
+                        "buy_price": buy_res["buy"]["buy_price"],
+                        "details": buy_res["buy"]
+                    }
+                else:
+                    return {"success": False, "error": buy_res.get("error", {}).get("message", "Purchase rejected")}
             else:
-                return {"success": False, "error": fall_res.get("error", {}).get("message", "Unknown error")}
+                return {"success": False, "error": fall_res.get("error", {}).get("message", "Proposal rejected")}
 
         except Exception as e:
             logger.error(f"Trade execution failed: {e}")
