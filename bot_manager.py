@@ -21,6 +21,7 @@ class BotManager:
         self.scanner_results: Dict[str, Dict[str, Any]] = {}
         self.active_trade: Optional[Dict[str, Any]] = None
         self.trade_history: List[Dict[str, Any]] = []
+        self.last_order_msg: str = "Engine initialized and scanning"
         
         # Performance Metrics
         self.total_trades = 0
@@ -77,8 +78,10 @@ class BotManager:
         for symbol in Config.WATCHLIST:
             symbol = symbol.strip()
             try:
-                macro_df = await self.client.get_candles(symbol, granularity=Config.MACRO_TIMEFRAME, count=80)
-                detail_df = await self.client.get_candles(symbol, granularity=Config.DETAIL_TIMEFRAME, count=80)
+                macro_df = await self.client.get_candles(symbol, granularity=Config.MACRO_TIMEFRAME, count=55)
+                # Space out macro and detail calls to respect API limits
+                await asyncio.sleep(0.3)
+                detail_df = await self.client.get_candles(symbol, granularity=Config.DETAIL_TIMEFRAME, count=55)
 
                 eval_result = self.strategy.evaluate_symbol(macro_df, detail_df)
                 self.scanner_results[symbol] = eval_result
@@ -88,6 +91,9 @@ class BotManager:
                     signal_type = eval_result["signal"]
                     logger.info(f"🚨 TRIGGER FOUND on {symbol}: {signal_type} | Status: {eval_result['status']}")
                     await self._execute_trade(symbol, eval_result)
+
+                # Space out symbol requests so Deriv never rate-limits
+                await asyncio.sleep(0.5)
 
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}")
@@ -101,7 +107,6 @@ class BotManager:
         risk_dist = setup["risk_dist"]
         
         # Calculate USD Stop Loss and Take Profit amounts relative to stake
-        # For a standard $10 stake, risk 100% of stake or proportional
         sl_usd = Config.STAKE_AMOUNT
         tp_usd = Config.STAKE_AMOUNT * Config.RR_RATIO
 
@@ -133,9 +138,12 @@ class BotManager:
                 "stake": Config.STAKE_AMOUNT,
                 "current_profit": 0.0
             }
+            self.last_order_msg = f"✅ Contract #{contract_id} active on {symbol} ({direction})"
             logger.info(f"🎯 Trade Active: {symbol} {direction} | Contract ID: {contract_id}")
         else:
-            logger.error(f"Order rejected by Deriv: {order_res.get('error')}")
+            err = order_res.get('error', 'Rejected')
+            self.last_order_msg = f"❌ Order failed on {symbol}: {err}"
+            logger.error(f"Order rejected by Deriv: {err}")
 
     async def _manage_active_trade(self):
         """Monitors open contract on Deriv for TP, SL, and Breakeven trigger."""

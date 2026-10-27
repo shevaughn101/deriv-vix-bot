@@ -46,6 +46,7 @@ class DerivClient:
         self._ping_task: Optional[asyncio.Task] = None
         self.is_running = True
         self._connecting = False
+        self._candle_cache: Dict[str, Any] = {}
 
     def _fetch_pat_otp_url(self) -> Optional[str]:
         """Fetches Demo account and WebSocket OTP URL using Deriv PAT REST API."""
@@ -292,8 +293,17 @@ class DerivClient:
             self.is_authorized = False
             return False
 
-    async def get_candles(self, symbol: str, granularity: int = 3600, count: int = 80) -> pd.DataFrame:
-        """Fetches historical OHLC candle data for any Deriv Volatility index."""
+    async def get_candles(self, symbol: str, granularity: int = 3600, count: int = 55) -> pd.DataFrame:
+        """Fetches historical OHLC candle data for any Deriv Volatility index with cache & backoff."""
+        import time
+        cache_key = f"{symbol}_{granularity}"
+        now = time.time()
+        if cache_key in self._candle_cache:
+            cache_time, cached_df = self._candle_cache[cache_key]
+            # Use cache if within 40 seconds to prevent rate limit spikes
+            if now - cache_time < 40 and not cached_df.empty:
+                return cached_df
+
         try:
             req = {
                 "ticks_history": symbol,
@@ -306,7 +316,15 @@ class DerivClient:
             }
             res = await self.send_request(req)
             if "error" in res:
-                logger.warning(f"Could not fetch candles for {symbol}: {res['error']['message']}")
+                err_msg = res["error"].get("message", "")
+                if "rate limit" in err_msg.lower() or "ticks_history_expensive" in err_msg.lower():
+                    logger.warning(f"Rate limited for {symbol}: {err_msg}. Backing off 1.5s...")
+                    await asyncio.sleep(1.5)
+                else:
+                    logger.warning(f"Could not fetch candles for {symbol}: {err_msg}")
+                # Fallback to existing cache if available even if slightly older
+                if cache_key in self._candle_cache:
+                    return self._candle_cache[cache_key][1]
                 return pd.DataFrame()
 
             candles = res.get("candles", [])
@@ -321,9 +339,12 @@ class DerivClient:
                 "low": "float64",
                 "close": "float64"
             })
+            self._candle_cache[cache_key] = (now, df)
             return df
         except Exception as e:
             logger.warning(f"Failed to fetch candles for {symbol}: {e}")
+            if cache_key in self._candle_cache:
+                return self._candle_cache[cache_key][1]
             return pd.DataFrame()
 
     async def buy_contract(
@@ -347,7 +368,6 @@ class DerivClient:
                 "basis": "stake",
                 "contract_type": contract_type,
                 "currency": self.account_info.get("currency", "USD"),
-                "symbol": symbol,
                 "underlying_symbol": symbol,
                 "multiplier": multiplier
             }
@@ -373,6 +393,10 @@ class DerivClient:
                         "buy_price": buy_res["buy"]["buy_price"],
                         "details": buy_res["buy"]
                     }
+                else:
+                    logger.warning(f"Multiplier purchase failed: {buy_res.get('error', {}).get('message')}")
+            else:
+                logger.warning(f"Multiplier proposal failed: {prop_res.get('error', {}).get('message')}")
 
             # Fallback to Rise/Fall Options
             fall_type = "CALL" if direction.upper() == "BUY" else "PUT"
@@ -383,7 +407,6 @@ class DerivClient:
                 "contract_type": fall_type,
                 "currency": self.account_info.get("currency", "USD"),
                 "underlying_symbol": symbol,
-                "symbol": symbol,
                 "duration": 15,
                 "duration_unit": "m"
             }

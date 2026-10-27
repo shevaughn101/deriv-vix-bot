@@ -36,6 +36,7 @@ async def get_status():
         "is_authorized": bot.client.is_authorized,
         "active_trade": bot.active_trade,
         "scanner": bot.scanner_results,
+        "last_order_msg": bot.last_order_msg,
         "stats": {
             "total_trades": bot.total_trades,
             "wins": bot.wins,
@@ -234,8 +235,8 @@ async def dashboard():
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
                     <div>
                         <strong style="font-size: 16px; color: var(--text);">🕹️ Bot Controls</strong>
-                        <div style="font-size: 13px; color: var(--text-muted); margin-top: 2px;">
-                            Trigger an instant test trade on your Deriv Demo account.
+                        <div id="engine-status" style="font-size: 13px; color: var(--accent); margin-top: 4px; font-weight: 500;">
+                            Engine initialized and scanning market...
                         </div>
                     </div>
                     <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
@@ -282,6 +283,7 @@ async def dashboard():
                     <div class="active-grid">
                         <div class="active-item"><span>Symbol</span><strong id="at-symbol">-</strong></div>
                         <div class="active-item"><span>Direction</span><strong id="at-dir">-</strong></div>
+                        <div class="active-item"><span>Floating P&L</span><strong id="at-profit" class="val-green">$0.00</strong></div>
                         <div class="active-item"><span>Entry Price</span><strong id="at-entry">-</strong></div>
                         <div class="active-item"><span>Stop Loss</span><strong id="at-sl" class="val-red">-</strong></div>
                         <div class="active-item"><span>Take Profit (1:3)</span><strong id="at-tp" class="val-green">-</strong></div>
@@ -357,6 +359,12 @@ async def dashboard():
 
                     document.getElementById('win-rate').innerText = `${stats.win_rate}% (${stats.wins}W / ${stats.losses}L / ${stats.breakevens}BE)`;
 
+                    // 2.5 Engine Status Message
+                    if (data.last_order_msg) {
+                        const esElem = document.getElementById('engine-status');
+                        if (esElem) esElem.innerText = data.last_order_msg;
+                    }
+
                     // 3. Active Trade
                     const atContainer = document.getElementById('active-trade-container');
                     if (data.active_trade) {
@@ -369,6 +377,13 @@ async def dashboard():
                         document.getElementById('at-sl').innerText = at.sl_price;
                         document.getElementById('at-tp').innerText = at.tp_price;
                         document.getElementById('at-status').innerText = at.is_breakeven ? '🔒 Risk-Free (SL to BE)' : '⏳ Active in Market';
+                        
+                        const profit = at.current_profit || 0.0;
+                        const profElem = document.getElementById('at-profit');
+                        if (profElem) {
+                            profElem.innerText = `${profit >= 0 ? '+$' : '-$'}${Math.abs(profit).toFixed(2)}`;
+                            profElem.className = profit >= 0 ? 'val-green' : 'val-red';
+                        }
                     } else {
                         atContainer.style.display = 'none';
                     }
