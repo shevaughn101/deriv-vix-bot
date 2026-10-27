@@ -9,9 +9,9 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.8
       - key: DERIV_API_TOKEN
-        sync: false
+        value: pat_f0a6cbfc53a8ea426f7b96a8292f11e838e325f2ca26a75e0063736726351642
       - key: DERIV_APP_ID
-        value: 1089
+        value: 34MjkAbFq1p73SzDZDHQg
       - key: WATCHLIST
         value: R_100,R_75,R_50,R_25,R_10,1HZ100V,1HZ75V,1HZ50V
       - key: STAKE_AMOUNT
